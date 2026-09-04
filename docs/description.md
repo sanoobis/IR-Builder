@@ -16,7 +16,9 @@ IR Builder creates a working TV remote when the original remote is unavailable. 
 - Auto scan supports pause, adjacent stepping, replay, resume, and selection.
 - Manual position entry accelerates while Left or Right is held.
 - Projects can be reopened and edited later.
-- Finished remotes are saved in the standard Flipper infrared format.
-- Extra buttons can be imported from another infrared remote file.
+- Existing infrared remotes can be opened and mapped onto the designed controls.
+- Unmatched imported signals appear on a third Other buttons screen.
+- Finished remotes are saved under infrared/ir_builder in the standard Flipper format.
+- Up to 48 unmatched buttons can be imported from another infrared remote file.
 
 The portrait interface keeps the infrared emitter pointed naturally toward the TV. The bundled library is private to IR Builder and does not modify the firmware's Universal Remotes data.

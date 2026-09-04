@@ -19,13 +19,13 @@ const uint8_t irb_nav_group[IRB_NAV_KEYS] = {IrbGroupUp,    IrbGroupLeft,  IrbGr
 uint32_t irb_base_count(const IrbProject* project) {
     uint32_t count = 0;
     for(unsigned i = 0; i < IRB_SLOTS; ++i)
-        count += project->positions[i] != 0;
+        count += irb_project_active(project, i);
     return count;
 }
 uint32_t irb_nav_count(const IrbProject* project) {
     uint32_t count = 0;
     for(unsigned i = 0; i < IRB_NAV_KEYS; ++i)
-        count += project->nav_positions[i] != 0;
+        count += irb_project_active(project, IRB_NAV_SLOT_BASE + i);
     return count;
 }
 bool irb_slot_is_nav(uint32_t slot) {
@@ -44,11 +44,54 @@ uint32_t irb_project_position(const IrbProject* project, uint32_t slot) {
     if(irb_slot_is_nav(slot)) return project->nav_positions[irb_nav_key_from_slot(slot)];
     return 0;
 }
+static void compact_imports(IrbProject* project) {
+    for(int source = (int)project->import_count - 1; source >= 0; --source) {
+        bool used = false;
+        for(unsigned i = 0; i < project->extra_count; ++i)
+            used |= project->extras[i].source == (uint32_t)source;
+        for(unsigned i = 0; i < IRB_POSITION_SLOTS; ++i)
+            used |= project->mapped[i].offset && project->mapped[i].source == (uint32_t)source;
+        if(used) continue;
+        memmove(&project->imports[source], &project->imports[source + 1],
+                (project->import_count - source - 1) * sizeof(IrbImportSource));
+        memset(&project->imports[--project->import_count], 0, sizeof(IrbImportSource));
+        for(unsigned i = 0; i < project->extra_count; ++i)
+            if(project->extras[i].source > (uint32_t)source) --project->extras[i].source;
+        for(unsigned i = 0; i < IRB_POSITION_SLOTS; ++i)
+            if(project->mapped[i].offset && project->mapped[i].source > (uint32_t)source)
+                --project->mapped[i].source;
+    }
+}
 void irb_project_set_position(IrbProject* project, uint32_t slot, uint32_t position) {
+    unsigned index = slot < IRB_SLOTS        ? slot
+                     : irb_slot_is_nav(slot) ? IRB_SLOTS + irb_nav_key_from_slot(slot)
+                                             : IRB_POSITION_SLOTS;
+    if(index < IRB_POSITION_SLOTS) memset(&project->mapped[index], 0, sizeof(IrbSignalRef));
     if(slot < IRB_SLOTS)
         project->positions[slot] = position;
     else if(irb_slot_is_nav(slot))
         project->nav_positions[irb_nav_key_from_slot(slot)] = position;
+    compact_imports(project);
+}
+const IrbSignalRef* irb_project_imported(const IrbProject* project, uint32_t slot) {
+    unsigned index = slot < IRB_SLOTS        ? slot
+                     : irb_slot_is_nav(slot) ? IRB_SLOTS + irb_nav_key_from_slot(slot)
+                                             : IRB_POSITION_SLOTS;
+    return index < IRB_POSITION_SLOTS && project->mapped[index].offset ? &project->mapped[index]
+                                                                       : NULL;
+}
+bool irb_project_set_imported(IrbProject* project, uint32_t slot, uint32_t source,
+                              uint32_t offset) {
+    unsigned index = slot < IRB_SLOTS        ? slot
+                     : irb_slot_is_nav(slot) ? IRB_SLOTS + irb_nav_key_from_slot(slot)
+                                             : IRB_POSITION_SLOTS;
+    if(index >= IRB_POSITION_SLOTS || !offset) return false;
+    if(slot < IRB_SLOTS)
+        project->positions[slot] = 0;
+    else
+        project->nav_positions[irb_nav_key_from_slot(slot)] = 0;
+    project->mapped[index] = (IrbSignalRef){.source = source, .offset = offset};
+    return true;
 }
 static bool label_matches(const char* label, const char* expected) {
     while(*label && *expected) {
@@ -66,7 +109,7 @@ int irb_nav_slot(const IrbProject* project, unsigned key) {
         {"down", "arrowdown", "dpaddown"}, {"menu", NULL, NULL},
         {"back", "return", NULL},          {"source", "input", "av"}};
     if(key >= IRB_NAV_KEYS) return -1;
-    if(project->nav_positions[key]) return IRB_NAV_SLOT_BASE + key;
+    if(irb_project_active(project, IRB_NAV_SLOT_BASE + key)) return IRB_NAV_SLOT_BASE + key;
     for(unsigned i = 0; i < project->extra_count; ++i)
         for(unsigned j = 0; j < 3 && aliases[key][j]; ++j)
             if(label_matches(project->extras[i].label, aliases[key][j])) return IRB_SLOTS + i;
@@ -101,13 +144,16 @@ void irb_project_init(IrbProject* project) {
 uint32_t irb_project_count(const IrbProject* project) {
     uint32_t count = 0;
     for(size_t i = 0; i < IRB_SLOTS; ++i)
-        count += project->positions[i] != 0;
+        count += irb_project_active(project, i);
     return count + irb_nav_count(project) + project->extra_count;
 }
 
 bool irb_project_active(const IrbProject* project, uint32_t slot) {
-    if(slot < IRB_SLOTS) return project->positions[slot] != 0;
-    if(irb_slot_is_nav(slot)) return project->nav_positions[irb_nav_key_from_slot(slot)] != 0;
+    if(slot < IRB_SLOTS)
+        return project->positions[slot] != 0 || irb_project_imported(project, slot);
+    if(irb_slot_is_nav(slot))
+        return project->nav_positions[irb_nav_key_from_slot(slot)] != 0 ||
+               irb_project_imported(project, slot);
     return slot < IRB_SLOTS + project->extra_count;
 }
 
@@ -151,34 +197,24 @@ void irb_project_move(IrbProject* project, uint32_t slot, bool down) {
 void irb_project_remove(IrbProject* project, uint32_t slot) {
     if(slot < IRB_SLOTS) {
         project->positions[slot] = 0;
-        return;
-    }
-    if(irb_slot_is_nav(slot)) {
+        memset(&project->mapped[slot], 0, sizeof(IrbSignalRef));
+    } else if(irb_slot_is_nav(slot)) {
         project->nav_positions[irb_nav_key_from_slot(slot)] = 0;
-        return;
+        memset(&project->mapped[IRB_SLOTS + irb_nav_key_from_slot(slot)], 0, sizeof(IrbSignalRef));
+    } else {
+        uint32_t extra = slot - IRB_SLOTS;
+        if(extra >= project->extra_count) return;
+        memmove(&project->extras[extra], &project->extras[extra + 1],
+                (project->extra_count - extra - 1) * sizeof(IrbExtraButton));
+        memset(&project->extras[--project->extra_count], 0, sizeof(IrbExtraButton));
+        for(unsigned i = 0; i < IRB_MAX_BUTTONS; ++i) {
+            if(project->order[i] == slot)
+                project->order[i] = IRB_MAX_BUTTONS - 1;
+            else if(project->order[i] > slot)
+                --project->order[i];
+        }
     }
-    uint32_t extra = slot - IRB_SLOTS;
-    if(extra >= project->extra_count) return;
-    memmove(&project->extras[extra], &project->extras[extra + 1],
-            (project->extra_count - extra - 1) * sizeof(IrbExtraButton));
-    memset(&project->extras[--project->extra_count], 0, sizeof(IrbExtraButton));
-    for(unsigned i = 0; i < IRB_MAX_BUTTONS; ++i) {
-        if(project->order[i] == slot)
-            project->order[i] = IRB_MAX_BUTTONS - 1;
-        else if(project->order[i] > slot)
-            --project->order[i];
-    }
-    for(int source = (int)project->import_count - 1; source >= 0; --source) {
-        bool used = false;
-        for(unsigned i = 0; i < project->extra_count; ++i)
-            used |= project->extras[i].source == (uint32_t)source;
-        if(used) continue;
-        memmove(&project->imports[source], &project->imports[source + 1],
-                (project->import_count - source - 1) * sizeof(IrbImportSource));
-        memset(&project->imports[--project->import_count], 0, sizeof(IrbImportSource));
-        for(unsigned i = 0; i < project->extra_count; ++i)
-            if(project->extras[i].source > (uint32_t)source) --project->extras[i].source;
-    }
+    compact_imports(project);
 }
 
 bool irb_name_valid(const char* name, bool filename) {
@@ -222,15 +258,14 @@ bool irb_library_path_valid(const char* path) {
 }
 
 bool irb_project_valid(const IrbProject* project) {
-    uint32_t seen = 0;
+    bool seen[IRB_MAX_BUTTONS] = {0};
     if(!irb_name_valid(project->name, true) || !irb_library_path_valid(project->library))
         return false;
     if(project->extra_count > IRB_MAX_EXTRAS || project->import_count > IRB_MAX_IMPORTS)
         return false;
     for(size_t i = 0; i < IRB_MAX_BUTTONS; ++i) {
-        if(project->order[i] >= IRB_MAX_BUTTONS || (seen & (UINT32_C(1) << project->order[i])))
-            return false;
-        seen |= 1U << project->order[i];
+        if(project->order[i] >= IRB_MAX_BUTTONS || seen[project->order[i]]) return false;
+        seen[project->order[i]] = true;
     }
     for(size_t i = 0; i < IRB_SLOTS + project->extra_count; ++i)
         if(!irb_name_valid(irb_project_label(project, i), false) ||
@@ -243,6 +278,15 @@ bool irb_project_valid(const IrbProject* project) {
         if(project->extras[i].source >= project->import_count ||
            project->extras[i].offset >= project->imports[project->extras[i].source].size)
             return false;
+    for(size_t i = 0; i < IRB_POSITION_SLOTS; ++i) {
+        uint32_t position =
+            i < IRB_SLOTS ? project->positions[i] : project->nav_positions[i - IRB_SLOTS];
+        if(project->mapped[i].offset && position) return false;
+        if(project->mapped[i].offset &&
+           (project->mapped[i].source >= project->import_count ||
+            project->mapped[i].offset >= project->imports[project->mapped[i].source].size))
+            return false;
+    }
     return true;
 }
 

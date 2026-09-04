@@ -12,8 +12,10 @@ The app includes its own TV signal library. It never replaces the firmware's sto
 - Accelerated manual position entry when Left or Right is held.
 - Portrait controller designed for pointing the Flipper's infrared emitter at a TV.
 - Saved projects can be reopened, edited, renamed, duplicated, and deleted.
-- Standard Flipper infrared remote export.
-- Optional import of extra buttons from another infrared file.
+- Open an existing `.ir` remote and automatically map its common controls.
+- Browse unmatched imported signals on a third **Other buttons** screen.
+- Standard Flipper infrared exports under `infrared/ir_builder`.
+- Optional import of up to 48 unmatched buttons from another infrared file.
 - Bundled library with 1,593 signals; no separate download is required.
 
 ## Install
@@ -24,14 +26,16 @@ For manual installation, copy `ir_builder.fap` to `apps/Infrared` on the Flipper
 
 ## Create a remote
 
-1. Open **New remote**.
+1. Open **New remote**, or choose **Open .ir** to build from working signals you already have.
 2. Choose a control on the first page, or open **Nav** for navigation controls.
 3. Enter a known one-based position, test individual candidates, or start **Auto scan**.
 4. Pause as soon as the TV reacts, replay the candidate if needed, and choose **Use number**.
 5. Repeat for the controls you need.
 6. Open **Menu > Name & save**.
 
-The exported remote appears in the standard Infrared saved-remotes area. IR Builder also keeps private project metadata so the remote can be edited later.
+The exported remote appears under `infrared/ir_builder` in the standard Infrared app. IR Builder keeps editable `.irb` project metadata in its private app-data directory.
+
+When opening an existing remote, IR Builder recognizes common names for Power, Volume, Channel, Mute, directions, OK, Menu, Back, and Input. Those signals populate the designed controller pages. Other signals keep their source order on the list reached through **Nav > Other**. The source file is copied into private app storage, so the project remains usable if the original file is moved.
 
 ## Signal library
 

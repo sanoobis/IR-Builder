@@ -33,7 +33,7 @@ def main():
     expected = (
         'appid="ir_builder"',
         'fap_category="Infrared"',
-        'fap_version=(3, 1)',
+        'fap_version=(3, 2)',
         'fap_author="@sanoobis"',
     )
     assert all(item in fam for item in expected), "Required FAM metadata is missing"

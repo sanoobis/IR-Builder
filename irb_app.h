@@ -25,13 +25,22 @@ typedef enum {
     Help,
     Scan,
     Navigation,
+    Others,
     ScreenCount
 } Screen;
-typedef enum { BrowseLibrary, BrowseImport, BrowseSaved } BrowsePurpose;
+typedef enum { BrowseLibrary, BrowseImport, BrowseSaved, BrowseOpen } BrowsePurpose;
 typedef enum { TextSave, TextLabel, TextRename, TextDuplicate } TextPurpose;
-typedef enum { ConfirmNew, ConfirmEdit, ConfirmReplace, ConfirmDelete, ConfirmLeave } ChoicePurpose;
+typedef enum {
+    ConfirmNew,
+    ConfirmOpen,
+    ConfirmEdit,
+    ConfirmReplace,
+    ConfirmDelete,
+    ConfirmLeave
+} ChoicePurpose;
 typedef enum {
     JobLoad,
+    JobOpen,
     JobDraft,
     JobSave,
     JobSend,
@@ -72,7 +81,7 @@ typedef struct {
     IrbScan scan;
     char path[IRB_PATH_SIZE], error[IRB_ERROR_SIZE], old_name[IRB_NAME_SIZE];
     unsigned slot, position;
-    uint32_t added;
+    uint32_t added, mapped;
     int entry;
     bool restore, saved, replace, rename, both, ok, conflict, repeatable;
     atomic_bool cancel, committing, held;
@@ -105,7 +114,7 @@ struct IrbApp {
     TextPurpose text_purpose;
     ChoicePurpose choice;
     char loaded_name[IRB_NAME_SIZE], text[IRB_NAME_SIZE], message[IRB_ERROR_SIZE];
-    char default_library[IRB_PATH_SIZE];
+    char default_library[IRB_PATH_SIZE], pending_path[IRB_PATH_SIZE];
 };
 extern const char irb_keys[];
 void irb_draw(Canvas* canvas, void* context);

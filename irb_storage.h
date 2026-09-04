@@ -7,6 +7,7 @@
 #define IRB_DATA_DIR "/ext/apps_data/ir_builder"
 #define IRB_PROJECT_DIR IRB_DATA_DIR "/remotes"
 #define IRB_IMPORT_DIR IRB_DATA_DIR "/imports"
+#define IRB_EXPORT_DIR "/ext/infrared/ir_builder"
 #define IRB_DRAFT_PATH IRB_DATA_DIR "/draft.irb"
 #define IRB_SETTINGS_PATH IRB_DATA_DIR "/settings.irb"
 #define IRB_ERROR_SIZE 160

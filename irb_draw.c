@@ -4,10 +4,18 @@
 #include <string.h>
 const char irb_keys[] = "abcdefghijklmnopqrstuvwxyz0123456789 _-";
 static bool view_navigation_available(const IrbApp* app) {
+    if(app->project.extra_count) return true;
     for(unsigned key = 0; key < IRB_NAV_KEYS; ++key)
         if(app->library.counts[irb_nav_group[key]] || irb_nav_slot(&app->project, key) >= 0)
             return true;
     return false;
+}
+static unsigned view_extra_slots(const IrbProject* project, uint8_t* slots) {
+    uint8_t all[IRB_MAX_BUTTONS];
+    unsigned total = irb_project_slots(project, all, true), count = 0;
+    for(unsigned i = 0; i < total; ++i)
+        if(all[i] >= IRB_SLOTS) slots[count++] = all[i];
+    return count;
 }
 static const char* position_title(const IrbViewModel* model) {
     return model->slot < IRB_SLOTS ? irb_slot_titles[model->slot]
@@ -96,11 +104,11 @@ static void grid(Canvas* canvas, IrbViewModel* m) {
     static const uint8_t y[] = {16, 16, 54, 54, 91, 91};
     static const uint8_t slots[] = {0, 6, 4, 2, 5, 3};
     for(unsigned i = 0; i < 6; ++i) {
-        bool set = m->project.positions[slots[i]] != 0;
-        bool complete = i < 2 ? set && m->project.positions[slots[i] + 1] : set;
+        bool set = irb_project_active(&m->project, slots[i]);
+        bool complete = i < 2 ? set && irb_project_active(&m->project, slots[i] + 1) : set;
         if(complete)
             canvas_draw_box(canvas, x[i], y[i], 3, 3);
-        else if(set || (i < 2 && m->project.positions[slots[i] + 1]))
+        else if(set || (i < 2 && irb_project_active(&m->project, slots[i] + 1)))
             canvas_draw_frame(canvas, x[i], y[i], 3, 3);
     }
     char text[24];
@@ -198,15 +206,21 @@ static void navigation(Canvas* canvas, IrbViewModel* m) {
         canvas_set_color(canvas, ColorBlack);
     }
     char status[28];
-    uint32_t selected = m->project.nav_positions[m->focus];
-    uint32_t total = m->counts[irb_nav_group[m->focus]];
-    if(!m->play && total)
-        snprintf(status, sizeof(status), "%s %lu/%lu", irb_nav_labels[m->focus],
-                 (unsigned long)selected, (unsigned long)total);
-    else
-        snprintf(status, sizeof(status), "%s", irb_nav_labels[m->focus]);
-    center(canvas, 116, status);
-    center(canvas, 127, m->play ? "OK: send" : "OK: edit");
+    if(m->focus < IRB_NAV_KEYS) {
+        uint32_t selected = m->project.nav_positions[m->focus];
+        uint32_t total = m->counts[irb_nav_group[m->focus]];
+        if(!m->play && selected && total)
+            snprintf(status, sizeof(status), "%s %lu/%lu", irb_nav_labels[m->focus],
+                     (unsigned long)selected, (unsigned long)total);
+        else if(!m->play && irb_project_imported(&m->project, IRB_NAV_SLOT_BASE + m->focus))
+            snprintf(status, sizeof(status), "%s imported", irb_nav_labels[m->focus]);
+        else
+            snprintf(status, sizeof(status), "%s", irb_nav_labels[m->focus]);
+        center(canvas, 111, status);
+    } else
+        center(canvas, 111, "Other buttons");
+    snprintf(status, sizeof(status), "Other [%lu] >", (unsigned long)m->project.extra_count);
+    row(canvas, 126, status, m->focus == IRB_NAV_KEYS, 0);
 }
 void irb_draw(Canvas* canvas, void* context) {
     IrbViewModel* m = context;
@@ -225,10 +239,10 @@ void irb_draw(Canvas* canvas, void* context) {
     switch(m->screen) {
     case Home: {
         header(canvas, "IR Builder");
-        const char* items[] = {"New remote", "Continue", "Saved", "Settings", "Help"};
-        list(canvas, items, 5, m->focus, 31);
-        center(canvas, 101, "Version " IRB_VERSION);
-        center(canvas, 114, m->simulate ? "SIM: IR OFF" : "Create & save");
+        const char* items[] = {"New remote", "Open .ir", "Continue", "Saved", "Settings", "Help"};
+        list(canvas, items, 6, m->focus, 28);
+        center(canvas, 108, "Version " IRB_VERSION);
+        center(canvas, 121, m->simulate ? "SIM: IR OFF" : "Create & save");
         break;
     }
     case Settings: {
@@ -270,14 +284,16 @@ void irb_draw(Canvas* canvas, void* context) {
         header(canvas, "Build remote");
         const char* items[] = {"Buttons", "Import .ir", "Name & save", "Help"};
         list(canvas, items, 4, m->focus, 33);
-        snprintf(buffer, sizeof(buffer), "%lu/32 keys", irb_project_count(&m->project));
+        snprintf(buffer, sizeof(buffer), "%lu/64 keys", irb_project_count(&m->project));
         center(canvas, 109, buffer);
         break;
     }
     case Buttons:
+    case Others:
     case Browser:
     case Import:
         header(canvas, m->screen == Buttons  ? "Buttons"
+                       : m->screen == Others ? "Other buttons"
                        : m->screen == Import ? "Import keys"
                                              : "Choose file");
         if(m->screen == Browser) {
@@ -297,15 +313,20 @@ void irb_draw(Canvas* canvas, void* context) {
         center(canvas, 115, buffer);
         if(!m->list_count) center(canvas, 44, "No entries");
         center(canvas, 127,
-               m->screen == Browser              ? "Hold OK: path"
-               : m->play && m->screen == Buttons ? "OK: send"
-                                                 : "OK: select");
+               m->screen == Browser                                       ? "Hold OK: path"
+               : m->play && (m->screen == Buttons || m->screen == Others) ? "OK: send"
+                                                                          : "OK: select");
         break;
     case ButtonMenu: {
         header(canvas, irb_project_label(&m->project, m->slot));
-        const char* items[] = {"Send once", "Change code", "Rename",
-                               "Move up",   "Move down",   "Remove"};
-        list(canvas, items, 6, m->focus, 31);
+        if(irb_slot_is_nav(m->slot)) {
+            const char* items[] = {"Send once", "Change code", "Remove"};
+            list(canvas, items, 3, m->focus, 31);
+        } else {
+            const char* items[] = {"Send once", "Change code", "Rename",
+                                   "Move up",   "Move down",   "Remove"};
+            list(canvas, items, 6, m->focus, 31);
+        }
         break;
     }
     case SavedMenu: {
@@ -357,9 +378,9 @@ void irb_draw(Canvas* canvas, void* context) {
             "1.",
             "Auto scan: OK pauses. L/R choose a nearby code. Replay tests it. Use saves its "
             "number.",
-            "Menu: import extra keys from a compatible .ir file. Imports are copied. Test them on "
-            "your TV.",
-            "Name & save exports to Infrared / Saved Remotes. Continue restores your latest draft.",
+            "Open .ir maps common keys to the controller. Unmatched signals appear after Nav in "
+            "Other buttons.",
+            "Name & save exports to Infrared / ir_builder. Continue restores your latest draft.",
             "Saved: use, edit, rename, duplicate or delete. Delete can keep the .ir export. Back "
             "returns."};
         header(canvas, "Help");
@@ -441,18 +462,19 @@ void irb_refresh(IrbApp* app) {
                     snprintf(m->rows[i], IRB_PATH_SIZE, "%s", app->page.names[i]);
                     m->row_directories[i] = app->page.directories[i];
                 }
-            } else if(app->screen == Buttons || app->screen == Import) {
+            } else if(app->screen == Buttons || app->screen == Others || app->screen == Import) {
                 uint8_t slots[IRB_MAX_BUTTONS];
                 m->list_count = app->screen == Buttons
                                     ? irb_project_slots(&app->project, slots, app->play)
-                                : app->catalog ? app->catalog->count + 1
-                                               : 0;
+                                : app->screen == Others ? view_extra_slots(&app->project, slots)
+                                : app->catalog          ? app->catalog->count + 1
+                                                        : 0;
                 if(app->focus >= m->list_count) app->focus = m->list_count ? m->list_count - 1 : 0;
                 m->focus = app->focus;
                 m->list_start = app->focus / IRB_PAGE_SIZE * IRB_PAGE_SIZE;
                 for(unsigned i = 0; i < IRB_PAGE_SIZE && m->list_start + i < m->list_count; ++i) {
                     unsigned index = m->list_start + i;
-                    const char* name = app->screen == Buttons
+                    const char* name = app->screen == Buttons || app->screen == Others
                                            ? irb_project_label(&app->project, slots[index])
                                        : index ? app->catalog->entries[index - 1].name
                                                : "Add all new";

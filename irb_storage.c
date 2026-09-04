@@ -6,7 +6,7 @@
 #include <string.h>
 
 #define IRB_MAX_LIBRARY_BYTES (8U * 1024U * 1024U)
-#define IRB_MAX_PROJECT_BYTES 8192U
+#define IRB_MAX_PROJECT_BYTES (16U * 1024U)
 #define IRB_MAX_TEXT_LINE_BYTES 512U
 #define IRB_MAX_DATA_LINE_BYTES (12U * 1024U)
 #define IRB_MAX_SIGNALS 8192U
@@ -298,8 +298,8 @@ bool irb_project_matches(const IrbProject* project, const IrbLibrary* library) {
 }
 
 bool irb_storage_prepare(Storage* storage) {
-    const char* paths[] = {"/ext/apps_data", IRB_DATA_DIR, IRB_PROJECT_DIR, IRB_IMPORT_DIR,
-                           "/ext/infrared"};
+    const char* paths[] = {"/ext/apps_data", IRB_DATA_DIR,    IRB_PROJECT_DIR,
+                           IRB_IMPORT_DIR,   "/ext/infrared", IRB_EXPORT_DIR};
     for(size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
         FS_Error result = storage_common_mkdir(storage, paths[i]);
         if(result != FSE_OK && result != FSE_EXIST) return false;
@@ -337,7 +337,7 @@ static bool read_project(Storage* storage, const char* path, IrbProject* project
         if(!flipper_format_file_open_existing(ff, path)) break;
         flipper_format_set_strict_mode(ff, true);
         if(!flipper_format_read_header(ff, type, &version) ||
-           (version != 1 && version != 2 && version != 3) ||
+           (version != 1 && version != 2 && version != 3 && version != 4) ||
            !furi_string_equal(type, "IR Builder project"))
             break;
         if(!read_string(ff, "Library", next->library, sizeof(next->library)) ||
@@ -346,12 +346,28 @@ static bool read_project(Storage* storage, const char* path, IrbProject* project
            !flipper_format_read_uint32(ff, "SourceSize", &next->source_size, 1) ||
            !flipper_format_read_uint32(ff, "Positions", next->positions, IRB_SLOTS))
             break;
-        if(version == 3 &&
+        if(version >= 3 &&
            !flipper_format_read_uint32(ff, "NavPositions", next->nav_positions, IRB_NAV_KEYS))
             break;
-        if(!flipper_format_read_uint32(ff, "Order", next->order,
-                                       version == 1 ? IRB_SLOTS : IRB_MAX_BUTTONS))
-            break;
+        if(version >= 4) {
+            uint32_t sources[IRB_POSITION_SLOTS], offsets[IRB_POSITION_SLOTS];
+            if(!flipper_format_read_uint32(ff, "MappedSources", sources, IRB_POSITION_SLOTS) ||
+               !flipper_format_read_uint32(ff, "MappedOffsets", offsets, IRB_POSITION_SLOTS))
+                break;
+            for(unsigned i = 0; i < IRB_POSITION_SLOTS; ++i)
+                next->mapped[i] = (IrbSignalRef){.source = sources[i], .offset = offsets[i]};
+        }
+        if(version >= 4) {
+            if(!flipper_format_read_uint32(ff, "Order", next->order, IRB_MAX_BUTTONS)) break;
+        } else {
+            enum { IrbLegacyButtons = 32 };
+            uint32_t legacy[IrbLegacyButtons];
+            unsigned count = version == 1 ? IRB_SLOTS : IrbLegacyButtons;
+            if(!flipper_format_read_uint32(ff, "Order", legacy, count)) break;
+            memcpy(next->order, legacy, count * sizeof(uint32_t));
+            for(unsigned i = count; i < IRB_MAX_BUTTONS; ++i)
+                next->order[i] = i;
+        }
         bool labels_ok = true;
         for(size_t i = 0; i < IRB_SLOTS; ++i) {
             char key[12];
@@ -382,6 +398,18 @@ static bool read_project(Storage* storage, const char* path, IrbProject* project
                 labels_ok &= flipper_format_read_uint32(ff, key, &next->extras[i].offset, 1);
             }
         }
+        // Versions 2 and 3 represented navigation controls as generic imported
+        // buttons. Promote recognized aliases into the designed navigation page.
+        if(labels_ok && version < 4) {
+            for(unsigned key = 0; key < IRB_NAV_KEYS; ++key) {
+                int slot = irb_nav_slot(next, key);
+                if(slot < IRB_SLOTS || irb_slot_is_nav((uint32_t)slot)) continue;
+                IrbExtraButton extra = next->extras[slot - IRB_SLOTS];
+                if(irb_project_set_imported(next, IRB_NAV_SLOT_BASE + key, extra.source,
+                                            extra.offset))
+                    irb_project_remove(next, slot);
+            }
+        }
         if(!labels_ok || !irb_project_valid(next)) break;
         *project = *next;
         ok = true;
@@ -409,15 +437,22 @@ bool irb_project_load(Storage* storage, const char* path, IrbProject* project, c
 
 static bool write_project(Storage* storage, const char* path, const IrbProject* project) {
     FlipperFormat* ff = flipper_format_file_alloc(storage);
+    uint32_t sources[IRB_POSITION_SLOTS], offsets[IRB_POSITION_SLOTS];
+    for(unsigned i = 0; i < IRB_POSITION_SLOTS; ++i) {
+        sources[i] = project->mapped[i].source;
+        offsets[i] = project->mapped[i].offset;
+    }
     bool ok =
         flipper_format_file_open_always(ff, path) &&
-        flipper_format_write_header_cstr(ff, "IR Builder project", 3) &&
+        flipper_format_write_header_cstr(ff, "IR Builder project", 4) &&
         flipper_format_write_string_cstr(ff, "Library", project->library) &&
         flipper_format_write_string_cstr(ff, "Name", project->name) &&
         flipper_format_write_uint32(ff, "SourceHash", &project->source_hash, 1) &&
         flipper_format_write_uint32(ff, "SourceSize", &project->source_size, 1) &&
         flipper_format_write_uint32(ff, "Positions", project->positions, IRB_SLOTS) &&
         flipper_format_write_uint32(ff, "NavPositions", project->nav_positions, IRB_NAV_KEYS) &&
+        flipper_format_write_uint32(ff, "MappedSources", sources, IRB_POSITION_SLOTS) &&
+        flipper_format_write_uint32(ff, "MappedOffsets", offsets, IRB_POSITION_SLOTS) &&
         flipper_format_write_uint32(ff, "Order", project->order, IRB_MAX_BUTTONS);
     for(size_t i = 0; ok && i < IRB_SLOTS; ++i) {
         char key[12];
@@ -544,7 +579,7 @@ bool irb_draft_save(Storage* storage, const IrbProject* project, char* error) {
 }
 
 void irb_remote_path(char* buffer, size_t size, const char* name, bool metadata) {
-    snprintf(buffer, size, "%s/%s.%s", metadata ? IRB_PROJECT_DIR : "/ext/infrared", name,
+    snprintf(buffer, size, "%s/%s.%s", metadata ? IRB_PROJECT_DIR : IRB_EXPORT_DIR, name,
              metadata ? "irb" : "ir");
 }
 
@@ -669,20 +704,29 @@ bool irb_project_check_sources(Storage* storage, const IrbProject* project, IrbL
 bool irb_project_read_signal(Storage* storage, IrbLibrary* library, const IrbProject* project,
                              uint32_t slot, InfraredSignal* signal) {
     if(!irb_project_active(project, slot)) return false;
-    if(slot < IRB_SLOTS)
+    const IrbSignalRef* mapped = irb_project_imported(project, slot);
+    if(slot < IRB_SLOTS && !mapped)
         return irb_library_read(library, irb_slot_group[slot], project->positions[slot], signal);
-    if(irb_slot_is_nav(slot)) {
+    if(irb_slot_is_nav(slot) && !mapped) {
         unsigned key = irb_nav_key_from_slot(slot);
         return irb_library_read(library, irb_nav_group[key], project->nav_positions[key], signal);
     }
-    const IrbExtraButton* extra = &project->extras[slot - IRB_SLOTS];
+    uint32_t source, offset;
+    if(mapped) {
+        source = mapped->source;
+        offset = mapped->offset;
+    } else {
+        const IrbExtraButton* extra = &project->extras[slot - IRB_SLOTS];
+        source = extra->source;
+        offset = extra->offset;
+    }
     FlipperFormat* reader = flipper_format_buffered_file_alloc(storage);
     flipper_format_set_strict_mode(reader, true);
-    bool ok =
-        flipper_format_buffered_file_open_existing(reader, project->imports[extra->source].path) &&
-        flipper_format_seek(reader, extra->offset, FlipperFormatOffsetFromStart) &&
-        infrared_signal_read_body(signal, reader) == InfraredErrorCodeNone &&
-        infrared_signal_is_valid(signal);
+    bool ok = source < project->import_count &&
+              flipper_format_buffered_file_open_existing(reader, project->imports[source].path) &&
+              flipper_format_seek(reader, offset, FlipperFormatOffsetFromStart) &&
+              infrared_signal_read_body(signal, reader) == InfraredErrorCodeNone &&
+              infrared_signal_is_valid(signal);
     flipper_format_free(reader);
     return ok;
 }

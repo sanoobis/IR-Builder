@@ -197,6 +197,33 @@ static bool commit_draft(IrbJob* job) {
     return irb_progress(IrbLoadCommit, 0, 1, job) &&
            irb_draft_save(job->app->storage, &job->project, job->error);
 }
+static void name_from_path(char output[IRB_NAME_SIZE], const char* path) {
+    const char* name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    unsigned length = 0;
+    while(name[length] && length < IRB_NAME_SIZE - 1) {
+        char c = name[length];
+        if(c == '.' && (name[length + 1] == 'i' || name[length + 1] == 'I') &&
+           (name[length + 2] == 'r' || name[length + 2] == 'R') && !name[length + 3])
+            break;
+        output[length] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                          (c >= '0' && c <= '9') || c == '_' || c == '-' || c == ' ')
+                             ? c
+                             : '_';
+        ++length;
+    }
+    while(length && output[length - 1] == ' ')
+        --length;
+    output[length] = 0;
+    if(!irb_name_valid(output, true)) snprintf(output, IRB_NAME_SIZE, "IR_Remote");
+}
+static void rollback_imports(Storage* storage, IrbProject* project, uint32_t keep) {
+    while(project->import_count > keep) {
+        --project->import_count;
+        storage_common_remove(storage, project->imports[project->import_count].path);
+        memset(&project->imports[project->import_count], 0, sizeof(IrbImportSource));
+    }
+}
 int32_t irb_work(void* context) {
     IrbJob* job = context;
     IrbApp* app = job->app;
@@ -233,6 +260,22 @@ int32_t irb_work(void* context) {
                                                       job->error, irb_progress, job))
             break;
         job->ok = job->restore ? !atomic_load(&job->cancel) : commit_draft(job);
+        break;
+    case JobOpen:
+        if(!irb_library_open_cached(storage, &job->library, &app->library, job->project.library,
+                                    job->error, irb_progress, job))
+            break;
+        job->project.source_hash = job->library.hash;
+        job->project.source_size = job->library.size;
+        name_from_path(job->project.name, job->path);
+        job->catalog = calloc(1, sizeof(*job->catalog));
+        if(!job->catalog ||
+           !irb_catalog_load(storage, job->catalog, job->path, job->error, irb_progress, job) ||
+           !irb_catalog_add(storage, job->catalog, &job->project, -1, &job->added, &job->mapped,
+                            job->error, irb_progress, job))
+            break;
+        job->ok = irb_project_matches(&job->project, &job->library) && commit_draft(job);
+        if(!job->ok) rollback_imports(storage, &job->project, 0);
         break;
     case JobDraft:
         job->ok = commit_draft(job);
@@ -272,14 +315,16 @@ int32_t irb_work(void* context) {
         job->ok = job->catalog &&
                   irb_catalog_load(storage, job->catalog, job->path, job->error, irb_progress, job);
         break;
-    case JobImport:
+    case JobImport: {
+        uint32_t previous_imports = job->project.import_count;
         job->ok = irb_catalog_add(storage, app->catalog, &job->project, job->entry, &job->added,
-                                  job->error, irb_progress, job);
+                                  &job->mapped, job->error, irb_progress, job);
         if(job->ok && !commit_draft(job)) {
             job->ok = false;
             job->added = 0;
+            rollback_imports(storage, &job->project, previous_imports);
         }
-        break;
+    } break;
     case JobDelete:
         if(irb_progress(IrbLoadCommit, 0, 1, job))
             job->ok = irb_project_delete(storage, &job->project, job->both, job->error);

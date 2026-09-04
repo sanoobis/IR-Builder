@@ -39,6 +39,7 @@ bool irb_catalog_load(Storage* storage, IrbCatalog* catalog, const char* path, c
                       IrbLoadProgress progress, void* context);
 // entry == -1 adds all available names. Original source is copied into app storage.
 bool irb_catalog_add(Storage* storage, const IrbCatalog* catalog, IrbProject* project, int entry,
-                     uint32_t* added, char* error, IrbLoadProgress progress, void* context);
+                     uint32_t* added, uint32_t* mapped, char* error, IrbLoadProgress progress,
+                     void* context);
 bool irb_files_page(Storage* storage, IrbFilePage* page, char* error, IrbLoadProgress progress,
                     void* context);

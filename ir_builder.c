@@ -9,6 +9,7 @@ static unsigned position_index(unsigned slot) {
     return irb_slot_is_nav(slot) ? IRB_SLOTS + irb_nav_key_from_slot(slot) : slot;
 }
 static bool navigation_available(const IrbApp* app) {
+    if(app->project.extra_count) return true;
     for(unsigned key = 0; key < IRB_NAV_KEYS; ++key)
         if(app->library.counts[irb_nav_group[key]] || irb_nav_slot(&app->project, key) >= 0)
             return true;
@@ -17,7 +18,14 @@ static bool navigation_available(const IrbApp* app) {
 static bool remembers(Screen screen) {
     return screen == Home || screen == Grid || screen == Pair || screen == ProjectMenu ||
            screen == Buttons || screen == Settings || screen == Navigation || screen == Browser ||
-           screen == Import;
+           screen == Import || screen == Others;
+}
+static unsigned extra_slots(const IrbProject* project, uint8_t* slots) {
+    uint8_t all[IRB_MAX_BUTTONS];
+    unsigned total = irb_project_slots(project, all, true), count = 0;
+    for(unsigned i = 0; i < total; ++i)
+        if(all[i] >= IRB_SLOTS) slots[count++] = all[i];
+    return count;
 }
 static void show(IrbApp* app, const char* text, Screen next) {
     if(remembers(app->screen)) app->focus_memory[app->screen] = app->focus;
@@ -119,6 +127,27 @@ static void finish_job(IrbApp* app) {
                 app->draft = true;
             go(app, job->saved ? SavedMenu : Grid);
             break;
+        case JobOpen: {
+            irb_cache_clear(&app->signals);
+            app->focus_memory[Grid] = app->focus_memory[Navigation] = app->focus_memory[Others] = 0;
+            memset(app->position_actions, 0, sizeof(app->position_actions));
+            irb_library_clear(&app->library);
+            app->library = job->library;
+            memset(&job->library, 0, sizeof(job->library));
+            app->project = job->project;
+            app->loaded_saved = false;
+            app->loaded_name[0] = 0;
+            app->draft = app->draft_current = true;
+            app->dirty = app->play = false;
+            go(app, Grid);
+            char text[128];
+            snprintf(text, sizeof(text),
+                     "Opened %lu keys: %lu mapped to the controller, %lu in Other keys.",
+                     (unsigned long)job->added, (unsigned long)job->mapped,
+                     (unsigned long)(job->added - job->mapped));
+            show(app, text, Grid);
+            break;
+        }
         case JobDraft:
             app->dirty = false;
             app->draft = app->draft_current = true;
@@ -130,7 +159,7 @@ static void finish_job(IrbApp* app) {
             snprintf(app->loaded_name, sizeof(app->loaded_name), "%s", app->project.name);
             show(app,
                  job->error[0] ? job->error
-                               : "Saved! Open Infrared > Saved Remotes, or Use remote here.",
+                               : "Saved to Infrared / ir_builder. Use it here or in Infrared.",
                  SavedMenu);
             break;
         case JobBrowse:
@@ -155,9 +184,9 @@ static void finish_job(IrbApp* app) {
             app->dirty = false;
             app->draft = app->draft_current = true;
             char text[100];
-            snprintf(text, sizeof(text),
-                     "Added %lu buttons. Existing names kept. Test the imported keys on your TV.",
-                     (unsigned long)job->added);
+            snprintf(text, sizeof(text), "Added %lu keys: %lu mapped, %lu in Other keys.",
+                     (unsigned long)job->added, (unsigned long)job->mapped,
+                     (unsigned long)(job->added - job->mapped));
             show(app, text, Import);
             break;
         }
@@ -198,6 +227,13 @@ static void load(IrbApp* app, const char* path, bool restore, bool saved) {
     snprintf(job->path, sizeof(job->path), "%s", path);
     job->restore = restore;
     job->saved = saved;
+    start_job(app, job, app->screen);
+}
+static void open_remote(IrbApp* app, const char* path) {
+    IrbJob* job = new_job(app, JobOpen);
+    irb_project_init(&job->project);
+    snprintf(job->project.library, sizeof(job->project.library), "%s", app->default_library);
+    snprintf(job->path, sizeof(job->path), "%s", path);
     start_job(app, job, app->screen);
 }
 static void set_library(IrbApp* app, const char* path) {
@@ -292,6 +328,10 @@ static void confirmed(IrbApp* app) {
     case ConfirmNew:
         go(app, Home);
         load(app, app->default_library, false, false);
+        break;
+    case ConfirmOpen:
+        go(app, Home);
+        open_remote(app, app->pending_path);
         break;
     case ConfirmEdit:
         app->play = false;
@@ -423,7 +463,7 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
     app->tick = 0;
     switch(app->screen) {
     case Home:
-        move(app, key, 5);
+        move(app, key, 6);
         if(key == InputKeyBack) view_dispatcher_stop(app->dispatcher);
         if(key == InputKeyOk) {
             if(app->focus == 0) {
@@ -432,14 +472,16 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
                            "Start a new remote? Current draft is replaced after loading.", Home);
                 else
                     load(app, app->default_library, false, false);
-            } else if(app->focus == 1) {
+            } else if(app->focus == 1)
+                browse(app, BrowseOpen, "/ext/infrared", 0);
+            else if(app->focus == 2) {
                 if(app->draft)
                     load(app, IRB_DRAFT_PATH, true, false);
                 else
                     show(app, "No draft yet. Choose New remote.", Home);
-            } else if(app->focus == 2)
+            } else if(app->focus == 3)
                 browse(app, BrowseSaved, IRB_PROJECT_DIR, 0);
-            else if(app->focus == 3)
+            else if(app->focus == 4)
                 go(app, Settings);
             else {
                 app->return_screen = Home;
@@ -484,7 +526,14 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
                 go(app, app->play ? Buttons : ProjectMenu);
             else if(app->focus < 2) {
                 app->pair = app->focus == 1;
-                go(app, Pair);
+                unsigned first = app->pair ? 6 : 0;
+                bool a = irb_project_active(&app->project, first);
+                bool b = irb_project_active(&app->project, first + 1);
+                if(app->play && a != b) {
+                    app->slot = a ? first : first + 1;
+                    send(app, false);
+                } else
+                    go(app, Pair);
             } else {
                 static const uint8_t slots[] = {4, 2, 5, 3};
                 app->slot = slots[app->focus - 2];
@@ -497,9 +546,22 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
         break;
     }
     case Navigation: {
-        if(key <= InputKeyLeft) app->focus = irb_nav_move(app->focus, key);
+        if(app->focus == IRB_NAV_KEYS) {
+            if(key == InputKeyUp) app->focus = 4;
+        } else if(key == InputKeyDown &&
+                  (app->focus == 4 || app->focus == 5 || app->focus == 6 || app->focus == 7))
+            app->focus = IRB_NAV_KEYS;
+        else if(key <= InputKeyLeft)
+            app->focus = irb_nav_move(app->focus, key);
         if(key == InputKeyBack) go(app, Grid);
         if(key == InputKeyOk) {
+            if(app->focus == IRB_NAV_KEYS) {
+                if(app->project.extra_count)
+                    go(app, Others);
+                else
+                    show(app, "No unmatched buttons in this remote.", Navigation);
+                break;
+            }
             int slot = irb_nav_slot(&app->project, app->focus);
             if(app->play) {
                 if(slot >= 0) {
@@ -524,6 +586,22 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
                          irb_nav_labels[app->focus]);
                 show(app, text, Navigation);
             }
+        }
+        break;
+    }
+    case Others: {
+        uint8_t slots[IRB_MAX_BUTTONS];
+        unsigned count = extra_slots(&app->project, slots);
+        move(app, key, count);
+        if(key == InputKeyBack) go(app, Navigation);
+        if(key == InputKeyOk && count) {
+            app->slot = slots[app->focus];
+            app->return_focus = app->focus;
+            app->button_return = Others;
+            if(app->play)
+                send(app, false);
+            else
+                go(app, ButtonMenu);
         }
         break;
     }
@@ -603,7 +681,7 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
         break;
     }
     case ButtonMenu:
-        move(app, key, 6);
+        move(app, key, irb_slot_is_nav(app->slot) ? 3 : 6);
         if(key == InputKeyBack) {
             go(app, app->button_return);
             app->focus = app->return_focus;
@@ -613,7 +691,11 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
                 send(app, false);
             else if(app->focus == 1)
                 position(app, app->slot, ButtonMenu);
-            else if(app->focus == 2)
+            else if(irb_slot_is_nav(app->slot)) {
+                irb_project_remove(&app->project, app->slot);
+                go(app, app->button_return);
+                persist(app, app->screen);
+            } else if(app->focus == 2)
                 keyboard(app, TextLabel, irb_project_label(&app->project, app->slot));
             else {
                 if(app->focus == 5) {
@@ -622,8 +704,10 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
                 } else {
                     irb_project_move(&app->project, app->slot, app->focus == 4);
                     uint8_t slots[IRB_MAX_BUTTONS];
-                    unsigned count = irb_project_slots(&app->project, slots, false);
-                    go(app, Buttons);
+                    unsigned count = app->button_return == Others
+                                         ? extra_slots(&app->project, slots)
+                                         : irb_project_slots(&app->project, slots, false);
+                    go(app, app->button_return);
                     for(unsigned i = 0; i < count; ++i)
                         if(slots[i] == app->slot) app->focus = i;
                 }
@@ -668,6 +752,7 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
         if(key == InputKeyBack)
             go(app, app->browse_purpose == BrowseSaved    ? Home
                     : app->browse_purpose == BrowseImport ? ProjectMenu
+                    : app->browse_purpose == BrowseOpen   ? Home
                                                           : Settings);
         if(key != InputKeyOk || !app->page.total) break;
         unsigned index = app->focus - app->page.start;
@@ -687,7 +772,15 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
             load(app, path, true, true);
         else if(app->browse_purpose == BrowseLibrary)
             set_library(app, path);
-        else {
+        else if(app->browse_purpose == BrowseOpen) {
+            if(app->draft) {
+                snprintf(app->pending_path, sizeof(app->pending_path), "%s", path);
+                choice(app, ConfirmOpen,
+                       "Open this .ir? Your current draft is replaced after it is verified.",
+                       Browser);
+            } else
+                open_remote(app, path);
+        } else {
             IrbJob* job = new_job(app, JobCatalog);
             snprintf(job->path, sizeof(job->path), "%s", path);
             start_job(app, job, Browser);
@@ -786,7 +879,8 @@ static bool custom(void* context, uint32_t event) {
 static void tick(void* context) {
     IrbApp* app = context;
     ++app->tick;
-    if(!app->worker && (app->screen == Browser || app->screen == Import || app->screen == Buttons))
+    if(!app->worker && (app->screen == Browser || app->screen == Import || app->screen == Buttons ||
+                        app->screen == Others))
         irb_refresh(app);
 }
 int32_t ir_builder_app(void* argument) {

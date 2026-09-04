@@ -5,8 +5,8 @@
 #include <stdint.h>
 
 #define IRB_SLOTS 8
-#define IRB_VERSION "3.1"
-#define IRB_MAX_EXTRAS 24
+#define IRB_VERSION "3.2"
+#define IRB_MAX_EXTRAS 48
 #define IRB_MAX_BUTTONS (IRB_SLOTS + IRB_MAX_EXTRAS)
 #define IRB_MAX_IMPORTS 4
 #define IRB_GROUPS 14
@@ -49,11 +49,17 @@ typedef struct {
 } IrbExtraButton;
 
 typedef struct {
+    uint32_t source;
+    uint32_t offset;
+} IrbSignalRef;
+
+typedef struct {
     char library[IRB_PATH_SIZE];
     char name[IRB_NAME_SIZE];
     char labels[IRB_SLOTS][IRB_NAME_SIZE];
     uint32_t positions[IRB_SLOTS];
     uint32_t nav_positions[IRB_NAV_KEYS];
+    IrbSignalRef mapped[IRB_POSITION_SLOTS];
     uint32_t order[IRB_MAX_BUTTONS];
     uint32_t source_hash;
     uint32_t source_size;
@@ -77,6 +83,8 @@ unsigned irb_nav_key_from_slot(uint32_t slot);
 int irb_slot_group_index(uint32_t slot);
 uint32_t irb_project_position(const IrbProject* project, uint32_t slot);
 void irb_project_set_position(IrbProject* project, uint32_t slot, uint32_t position);
+bool irb_project_set_imported(IrbProject* project, uint32_t slot, uint32_t source, uint32_t offset);
+const IrbSignalRef* irb_project_imported(const IrbProject* project, uint32_t slot);
 int irb_nav_slot(const IrbProject* project, unsigned key);
 bool irb_has_navigation(const IrbProject* project);
 unsigned irb_nav_move(unsigned key, unsigned direction);

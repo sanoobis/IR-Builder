@@ -19,9 +19,17 @@ bool irb_signal_key(const IrbLibrary* library, const IrbProject* project, unsign
                     IrbSignalKey* key) {
     memset(key, 0, sizeof(*key));
     if(!irb_project_active(project, slot)) return false;
-    if(slot < IRB_SLOTS) {
+    const IrbSignalRef* mapped = irb_project_imported(project, slot);
+    if(mapped) {
+        if(mapped->source >= project->import_count) return false;
+        const IrbImportSource* source = &project->imports[mapped->source];
+        snprintf(key->path, sizeof(key->path), "%s", source->path);
+        key->hash = source->hash;
+        key->size = source->size;
+        key->offset = mapped->offset;
+    } else if(slot < IRB_SLOTS) {
         unsigned group = irb_slot_group[slot], position = project->positions[slot];
-        if(!library->storage || position > library->counts[group] ||
+        if(!library->storage || !position || position > library->counts[group] ||
            library->hash != project->source_hash || library->size != project->source_size ||
            !irb_path_equal(library->path, project->library))
             return false;
